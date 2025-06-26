@@ -26,7 +26,6 @@ with st.sidebar:
     m0 = st.date_input(
         "Current inventory month (m0)",
         value=date.today().replace(day=1),
-        format="%B %Y",
         help="Select the month that represents inventory on hand right now.")
 
     horizon = st.number_input("Plan horizon (months)", 3, 12, 6, step=1)
