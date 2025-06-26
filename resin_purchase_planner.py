@@ -6,15 +6,19 @@ import openai, os
 import matplotlib.pyplot as plt
 from datetime import date
 
-# ---------- Page config ----------
 st.set_page_config(page_title="Resin Purchase & Production Advisor", layout="wide")
 st.title("📈 Resin Purchase & Production Advisor")
 
 st.markdown("""### Overview
 * Corporate **Resin Games Plan**
 * FG capacity 500 t
-* Historical price chart (USD/t) with dotted 3‑month forecast
-* **AI Outlook** – ใช้เพียง `OPENAI_API_KEY`
+* Historical price chart (USD/t) (no future dots)
+* **Automatic FG / Resin safety days** based on AI price outlook
+  * baseline 7 prod‑days
+  * if AI predicts **UP** > 30 USD → 14 days
+  * if **UP** ≤ 30 USD → 10 days
+  * if **DOWN** > 30 USD → 3 days
+  * otherwise keep 7 days
 """)
 
 # ---------- Sidebar ----------
@@ -25,12 +29,10 @@ with st.sidebar:
     fg_open = st.number_input("Opening FG inventory (t)", 0.0, 500.0, 465.0, step=10.0)
     resin_open = st.number_input("Opening resin inventory (t)", 0.0, 20000.0, 132.0, step=10.0)
     resin_blended_open = st.number_input("Opening blended resin price (USD/t)", 0.0, 2000.0, 694.0, step=10.0)
-    fg_target_days = st.number_input("FG safety stock (days)", 0, 60, 15, step=1)
-    resin_target_days = st.number_input("Resin safety stock (days)", 0, 30, 5, step=1)
     prod_days = st.number_input("Production days / month", 15, 31, 25, step=1)
     usage_ratio = st.number_input("Resin usage ratio (% of production)", 0.0, 1.0, 0.725, step=0.005)
 
-FG_CAP = 500  # t cap
+FG_CAP = 500
 
 # ---------- Historical price ----------
 hist = pd.DataFrame({
@@ -41,28 +43,48 @@ hist = pd.DataFrame({
 })
 hist["Date"] = pd.to_datetime(hist["Month"], format="%b-%y")
 
-x = np.arange(len(hist))
-slope, intercept = np.polyfit(x, hist["USD/t"], 1)
-future_x = np.arange(len(hist), len(hist)+3)
-forecast_dates = pd.date_range(hist["Date"].iloc[-1] + pd.offsets.MonthBegin(), periods=3, freq="MS")
-forecast_vals = intercept + slope*future_x
-forecast_df = pd.DataFrame({"Date": forecast_dates, "USD/t": forecast_vals, "Forecast": True})
-plot_df = pd.concat([hist.assign(Forecast=False)[["Date","USD/t","Forecast"]], forecast_df])
-
 st.subheader("PVC Resin Price (USD/t)")
-fig, ax = plt.subplots()
-ax.plot(plot_df[plot_df["Forecast"]==False]["Date"],
-        plot_df[plot_df["Forecast"]==False]["USD/t"],
-        marker="o", label="Actual")
-ax.plot(plot_df[plot_df["Forecast"]==True]["Date"],
-        plot_df[plot_df["Forecast"]==True]["USD/t"],
-        linestyle="--", marker="o", label="Forecast")
-ax.set_ylabel("USD / t")
-ax.grid(True, linestyle=":")
-ax.legend()
-st.pyplot(fig, use_container_width=True)
+st.line_chart(hist.set_index("Date")["USD/t"], use_container_width=True)
 
-# ---------- Assumption table ----------
+# ---------- AI price outlook ----------
+def ai_outlook():
+    key=os.getenv("OPENAI_API_KEY")
+    price_series = "\n".join(f"{m}: {p}" for m,p in zip(hist['Month'], hist['USD/t']))
+    if not key:
+        return "FLAT", 0.0, "OPENAI_API_KEY not set, using FLAT"
+    openai.api_key = key
+    prompt = (
+        "You are a petrochemical analyst. Historical PVC resin prices (USD/t):\n"
+        f"{price_series}\n\n"
+        "Estimate the average price change expected for NEXT month (positive = UP, negative = DOWN). "
+        "Return a JSON object like {"direction":"UP","delta":25,"reason":"..."} "
+    )
+    try:
+        ans = openai.ChatCompletion.create(model="gpt-3.5-turbo",
+                                           messages=[{"role":"user","content":prompt}],
+                                           max_tokens=100).choices[0].message.content.strip()
+        data = json.loads(ans)
+        return data.get("direction","FLAT"), float(data.get("delta",0)), data.get("reason","")
+    except Exception as e:
+        return "FLAT",0.0,f"GPT error:{e}"
+
+direction, delta, reason = ai_outlook()
+st.subheader("AI Outlook")
+st.write(f"**Trend:** {direction}  |  **Δ ≈ {delta:+.0f} USD**")
+st.write(reason)
+
+# ---------- Determine safety days ----------
+baseline = 7
+if direction=="UP":
+    fg_days = resin_days = 14 if delta>30 else 10
+elif direction=="DOWN":
+    fg_days = resin_days = 3 if delta>30 else baseline
+else:
+    fg_days = resin_days = baseline
+
+st.info(f"Safety stock guideline set to **{fg_days} production‑days** based on outlook.")
+
+# ---------- Editable sales/price table ----------
 months = pd.date_range(pd.to_datetime(m0), periods=horizon, freq="MS").strftime("%b-%y").tolist()
 def default_df(labels):
     return pd.DataFrame({
@@ -82,63 +104,33 @@ st.divider()
 
 # ---------- Planner ----------
 def compute(df):
-    fg, resin, blended = fg_open, resin_open, resin_blended_open
+    fg,resin,blended=fg_open,resin_open,resin_blended_open
     rows=[]
     for i,row in df.iterrows():
         sales=row["Sales Plan (t)"]
         next_sales=df.iloc[i+1]["Sales Plan (t)"] if i+1<len(df) else sales
-        fg_target = fg_target_days/prod_days*next_sales
-        prod_raw = max(0, sales + fg_target - fg)
-        fg_close = min(fg + prod_raw - sales, FG_CAP)
-        production = fg_close + sales - fg
-        resin_use = production*usage_ratio
+        fg_target=fg_days/prod_days*next_sales
+        prod_raw=max(0,sales+fg_target-fg)
+        fg_close=min(fg+prod_raw-sales, FG_CAP)
+        production=fg_close+sales-fg
+        resin_use=production*usage_ratio
         next_prod=df.iloc[i+1]["Sales Plan (t)"] if i+1<len(df) else production
-        resin_target = resin_target_days/prod_days*next_prod*usage_ratio
+        resin_target=resin_days/prod_days*next_prod*usage_ratio
         prices={k:row[k] for k in ["Local","TPE","China/Korea"] if pd.notna(row[k])}
         src=min(prices,key=prices.get); price=prices[src]
         purchase=max(0,resin_use+resin_target-resin)
-        if resin+purchase:
-            blended = (resin*blended + purchase*price)/(resin+purchase)
-        resin_close = resin + purchase - resin_use
+        blended=(resin*blended+purchase*price)/(resin+purchase) if (resin+purchase) else blended
+        resin_close=resin+purchase-resin_use
         rows.append({"Month":row["Month"],"Sales":sales,"Production":production,"FG Close":fg_close,
-                     "Purchase":purchase,"Unit Price":price,"Source":src,"Resin Close":resin_close,
+                     "Days FG":round(fg_close/(next_sales/prod_days),1) if next_sales else 0,
+                     "Purchase":purchase,"Unit Price":price,"Source":src,
+                     "Resin Close":resin_close,
+                     "Days Resin":round(resin_close/((next_prod*usage_ratio)/prod_days),1) if next_prod else 0,
                      "Blended":blended})
-        fg, resin = fg_close, resin_close
+        fg,resin=fg_close,resin_close
     return pd.DataFrame(rows)
 
-def style(df):
-    return df.set_index("Month").T.style
-
-# ---------- AI Outlook ----------
-def ai_outlook():
-    key=os.getenv("OPENAI_API_KEY")
-    if not key:
-        return "N/A","OPENAI_API_KEY not set"
-    openai.api_key=key
-    price_table="\n".join(f"{m}: {p}" for m,p in zip(hist['Month'], hist['USD/t']))
-    prompt = (
-        "You are a petrochemical market analyst.\n"
-        "Historical PVC resin prices (USD/t):\n"
-        f"{price_table}\n\n"
-        "Predict the price direction (UP, DOWN, FLAT) for the next 3 months for SE Asia import prices "
-        "and list 2‑3 key demand/supply drivers."
-    )
-    try:
-        txt=openai.ChatCompletion.create(model="gpt-3.5-turbo",
-                                         messages=[{"role":"user","content":prompt}],
-                                         max_tokens=150).choices[0].message.content.strip()
-        return txt.split()[0], txt
-    except Exception as e:
-        return "N/A", f"GPT error: {e}"
-
-# ---------- Button ----------
-if st.button("🚀 Generate Plan & AI Outlook"):
-    plan = compute(assump_df.copy())
-    trend, detail = ai_outlook()
-    st.subheader("PVC Resin Outlook (next 3 months)")
-    st.write(f"**Trend:** {trend}")
-    st.write(detail)
-    period = f"{m0:%b %Y} – {(pd.to_datetime(m0)+pd.DateOffset(months=horizon-1)):%b %Y}"
-    st.subheader(f"BNI Resin Games Plan : {period}")
-    st.markdown(style(plan).to_html(), unsafe_allow_html=True)
-    st.download_button("Download CSV", plan.to_csv(index=False).encode(), "resin_plan.csv", mime="text/csv")
+plan_df = compute(assump_df.copy())
+st.subheader("Plan Summary")
+st.dataframe(plan_df, use_container_width=True)
+st.download_button("Download CSV", plan_df.to_csv(index=False).encode(), "resin_plan.csv", mime="text/csv")
