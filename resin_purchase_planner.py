@@ -5,51 +5,36 @@ import numpy as np
 from datetime import date
 
 st.set_page_config(page_title="Resin Purchase & Production Advisor", layout="wide")
-
 st.title("📈 Resin Purchase & Production Advisor")
 
-"""
-### How it works
-1. **Input only** two items per month  
-   • Sales plan (t)  
-   • Landed resin prices (Local, TPE, China/Korea)  
-
-2. The app calculates, for each month:  
-   • Production needed to keep FG at target days  
-   • Resin to purchase (cheapest source) to hit resin days  
-   • Moving‑average blended resin cost  
-   • Ending FG & Resin stocks + their days of cover
-"""
+"""App to suggest monthly production and resin purchases based on sales plan & resin prices."""
 
 
-# ---------------- Sidebar parameters ----------------
+# ---- Sidebar ----
 with st.sidebar:
     st.header("Global Parameters")
 
     m0 = st.date_input(
         "Current inventory month (m0)",
         value=date.today().replace(day=1),
-        help="Select the month that matches current inventory."
+        help="Month representing current inventory"
     )
 
     horizon = st.number_input("Plan horizon (months)", 3, 12, 6, step=1)
 
-    fg_open = st.number_input("Opening FG inventory (t)", 0.0, 20_000.0, 465.0, step=10.0)
-    resin_open = st.number_input("Opening resin inventory (t)", 0.0, 20_000.0, 132.0, step=10.0)
-    resin_blended_open = st.number_input("Opening blended resin price (USD/t)",
-                                         0.0, 2_000.0, 694.0, step=10.0)
+    fg_open = st.number_input("Opening FG inventory (t)", 0.0, 20000.0, 465.0, step=10.0)
+    resin_open = st.number_input("Opening resin inventory (t)", 0.0, 20000.0, 132.0, step=10.0)
+    resin_blended_open = st.number_input("Opening blended resin price (USD/t)", 0.0, 2000.0, 694.0, step=10.0)
 
     fg_target_days = st.number_input("FG safety stock (days)", 0, 60, 15, step=1)
     resin_target_days = st.number_input("Resin safety stock (days)", 0, 30, 5, step=1)
     prod_days = st.number_input("Production days per month", 15, 31, 25, step=1)
-    usage_ratio = st.number_input("Resin usage ratio (% of production)",
-                                  0.0, 1.0, 0.725, step=0.005, format="%.3f")
+    usage_ratio = st.number_input("Resin usage ratio (% of production)", 0.0, 1.0, 0.725, step=0.005)
 
-
-# -------------- Rolling month list -----------------
+# ---- Rolling month list ----
 months = pd.date_range(pd.to_datetime(m0), periods=horizon, freq="MS").strftime("%b-%Y")
 
-# -------------- Input table ------------------------
+# ---- Default table ----
 def default_df(labels):
     rows = []
     base_sales = 800
@@ -57,15 +42,14 @@ def default_df(labels):
     for i, m in enumerate(labels):
         rows.append({
             "Month": m,
-            "Sales Plan (t)": base_sales + i * 50,
-            "Local": base_local + i * 10,
-            "TPE": np.nan if i > 1 else 760 - i * 15,
-            "China/Korea": np.nan if i > 1 else 740 - i * 11,
+            "Sales Plan (t)": base_sales + 50*i,
+            "Local": base_local + 10*i,
+            "TPE": np.nan if i>1 else 760 - 15*i,
+            "China/Korea": np.nan if i>1 else 740 - 11*i,
         })
     return pd.DataFrame(rows)
 
-
-if "sales_price_df" not in st.session_state         or st.session_state.get("cache_m0") != m0         or st.session_state.get("cache_horizon") != horizon:
+if "sales_price_df" not in st.session_state or    st.session_state.get("cache_m0") != m0 or    st.session_state.get("cache_horizon") != horizon:
     st.session_state["sales_price_df"] = default_df(months)
     st.session_state["cache_m0"] = m0
     st.session_state["cache_horizon"] = horizon
@@ -77,24 +61,19 @@ df = st.data_editor(
     key="data_editor",
     column_config={
         "Month": st.column_config.Column(required=True),
-        "Sales Plan (t)": st.column_config.Column(required=True, type="number"),
-        "Local": st.column_config.Column(type="number"),
-        "TPE": st.column_config.Column(type="number"),
-        "China/Korea": st.column_config.Column(type="number"),
+        "Sales Plan (t)": st.column_config.NumberColumn(required=True),
+        "Local": st.column_config.NumberColumn(),
+        "TPE": st.column_config.NumberColumn(),
+        "China/Korea": st.column_config.NumberColumn(),
     },
 )
 
 st.divider()
 
-# -------------- Core planner -----------------------
-def compute_plan(df: pd.DataFrame,
-                 fg_open: float,
-                 resin_open: float,
-                 resin_blended_open: float,
-                 fg_target_days: int,
-                 resin_target_days: int,
-                 prod_days: int,
-                 usage_ratio: float) -> pd.DataFrame:
+# ---- Core planner ----
+def compute_plan(df, fg_open, resin_open, resin_blended_open,
+                 fg_target_days, resin_target_days,
+                 prod_days, usage_ratio):
 
     results = []
     fg_inv = fg_open
@@ -102,19 +81,19 @@ def compute_plan(df: pd.DataFrame,
     blended_price = resin_blended_open
 
     for idx in range(len(df)):
-        month = df.loc[idx, "Month"]
-        sales = df.loc[idx, "Sales Plan (t)"]
+        month = df.at[idx, "Month"]
+        sales = df.at[idx, "Sales Plan (t)"]
 
-        next_sales = df.loc[idx + 1, "Sales Plan (t)"] if idx + 1 < len(df) else sales
+        next_sales = df.at[idx+1, "Sales Plan (t)"] if idx+1 < len(df) else sales
         fg_target_close = fg_target_days / prod_days * next_sales
         production = max(0.0, sales + fg_target_close - fg_inv)
 
         resin_usage = production * usage_ratio
-        next_prod_est = df.loc[idx + 1, "Sales Plan (t)"] if idx + 1 < len(df) else production
+        next_prod_est = df.at[idx+1, "Sales Plan (t)"] if idx+1 < len(df) else production
         resin_target_close = resin_target_days / prod_days * next_prod_est * usage_ratio
 
-        price_cols = [c for c in ["Local", "TPE", "China/Korea"] if pd.notna(df.loc[idx, c])]
-        prices = {c: df.loc[idx, c] for c in price_cols}
+        price_cols = [c for c in ["Local", "TPE", "China/Korea"] if pd.notna(df.at[idx, c])]
+        prices = {c: df.at[idx, c] for c in price_cols}
         cheapest_src = min(prices, key=prices.get)
         cheapest_price = prices[cheapest_src]
 
@@ -134,13 +113,13 @@ def compute_plan(df: pd.DataFrame,
             "Sales (t)": sales,
             "Production (t)": production,
             "FG Close (t)": closing_fg_inv,
-            "FG Days": round(fg_days, 1),
+            "FG Days": round(fg_days,1),
             "Resin Close (t)": closing_resin_inv,
-            "Resin Days": round(resin_days, 1),
+            "Resin Days": round(resin_days,1),
             "Purchase (t)": purchase_qty,
             "Source": cheapest_src,
             "Unit Price (USD/t)": cheapest_price,
-            "Blended $/t": round(blended_price, 2),
+            "Blended $/t": round(blended_price,2),
         })
 
         fg_inv = closing_fg_inv
@@ -148,33 +127,26 @@ def compute_plan(df: pd.DataFrame,
 
     return pd.DataFrame(results)
 
-
-# -------------- Run button -------------------------
 if st.button("🚀 Suggest Plan"):
     plan = compute_plan(df.copy(),
-                        fg_open,
-                        resin_open,
-                        resin_blended_open,
-                        fg_target_days,
-                        resin_target_days,
-                        prod_days,
-                        usage_ratio)
+                        fg_open, resin_open, resin_blended_open,
+                        fg_target_days, resin_target_days,
+                        prod_days, usage_ratio)
 
     st.subheader("Recommended Production & Purchase Plan")
-    st.dataframe(
-        plan.style.format({
-            "Sales (t)": "{:.1f}",
-            "Production (t)": "{:.1f}",
-            "FG Close (t)": "{:.1f}",
-            "FG Days": "{:.1f}",
-            "Resin Close (t)": "{:.1f}",
-            "Resin Days": "{:.1f}",
-            "Purchase (t)": "{:.1f}",
-            "Unit Price (USD/t)": "{:.0f}",
-            "Blended $/t": "{:.0f}",
-        }), use_container_width=True)
+    st.dataframe(plan.style.format({
+        "Sales (t)": "{:.1f}",
+        "Production (t)": "{:.1f}",
+        "FG Close (t)": "{:.1f}",
+        "FG Days": "{:.1f}",
+        "Resin Close (t)": "{:.1f}",
+        "Resin Days": "{:.1f}",
+        "Purchase (t)": "{:.1f}",
+        "Unit Price (USD/t)": "{:.0f}",
+        "Blended $/t": "{:.0f}",
+    }), use_container_width=True)
 
     csv = plan.to_csv(index=False).encode()
     st.download_button("Download CSV", csv,
-                       "resin_production_purchase_plan.csv",
+                       file_name="resin_production_purchase_plan.csv",
                        mime="text/csv")
