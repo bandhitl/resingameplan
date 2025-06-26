@@ -2,5 +2,5 @@ streamlit>=1.34
 pandas>=2.2
 numpy>=1.26
 requests>=2.31
-openai>=1.23
+openai==0.28        # ตรึงเวอร์ชันเดิมเพื่อใช้ ChatCompletion API
 matplotlib>=3.8
