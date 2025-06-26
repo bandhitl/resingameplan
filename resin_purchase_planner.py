@@ -7,20 +7,24 @@ from datetime import date
 st.set_page_config(page_title="Resin Purchase & Production Advisor", layout="wide")
 st.title("📈 Resin Purchase & Production Advisor")
 
-"""Input **sales plan** & **resin prices** → get a dashboard that mimics the official
-“Resin Games Plan” (orange resin rows, blue day counts, grey headers)."""
+"""Dashboard replicating the BNI “Resin Games Plan” layout (colours + fonts).
+Additions:
+• Shows **Resin Unit Price** and **Resin Source** rows.
+• Enforces FG inventory capacity cap of **500 t**.
+"""
 
 
-# ───────────────────────── Sidebar ─────────────────────────
+# ────────────── Sidebar Parameters ──────────────
 with st.sidebar:
     st.header("Global Parameters")
 
     m0 = st.date_input("Current inventory month (m0)",
                        value=date.today().replace(day=1))
 
-    horizon = st.number_input("Plan horizon (months)", 3, 12, 4, step=1)
+    horizon = st.number_input("Plan horizon (months)", 3, 12, 4, step=1,
+                              help="Months shown in the table (m1…mN)")
 
-    fg_open = st.number_input("Opening FG inventory (t)", 0.0, 20_000.0,
+    fg_open = st.number_input("Opening FG inventory (t)", 0.0, 500.0,
                               465.0, step=10.0)
     resin_open = st.number_input("Opening resin inventory (t)", 0.0, 20_000.0,
                                  132.0, step=10.0)
@@ -33,7 +37,9 @@ with st.sidebar:
     usage_ratio = st.number_input("Resin usage ratio (% of prod.)",
                                   0.0, 1.0, 0.725, step=0.005)
 
-# ───────────── Build editable assumption table ─────────────
+FG_CAP = 500  # t
+
+# ───────────── Month list ─────────────
 months = pd.date_range(pd.to_datetime(m0),
                        periods=horizon,
                        freq="MS").strftime("%b-%y")
@@ -62,6 +68,7 @@ assump_df = st.data_editor(
     st.session_state["assump_df"],
     num_rows="dynamic",
     use_container_width=True,
+    key="input_table",
     column_config={
         "Month": st.column_config.Column(required=True),
         "Sales Plan (t)": st.column_config.NumberColumn(required=True),
@@ -69,12 +76,11 @@ assump_df = st.data_editor(
         "TPE": st.column_config.NumberColumn(),
         "China/Korea": st.column_config.NumberColumn(),
     },
-    key="input_table"
 )
 
 st.divider()
 
-# ─────────────────────────── Engine ─────────────────────────
+# ───────────── Core planner ─────────────
 def compute(plan_df: pd.DataFrame):
     fg_inv, resin_inv, blended = fg_open, resin_open, resin_blended_open
     rows = []
@@ -84,7 +90,16 @@ def compute(plan_df: pd.DataFrame):
         next_sales = plan_df.iloc[i + 1]["Sales Plan (t)"] if i + 1 < len(plan_df) else sales
 
         fg_target_close = fg_target_days / prod_days * next_sales
-        production = max(0.0, sales + fg_target_close - fg_inv)
+        prod_raw = max(0.0, sales + fg_target_close - fg_inv)
+
+        fg_close_raw = fg_inv + prod_raw - sales
+        if fg_close_raw > FG_CAP:  # enforce 500 t capacity
+            prod_adj = max(0.0, prod_raw - (fg_close_raw - FG_CAP))
+            fg_close = FG_CAP
+            production = prod_adj
+        else:
+            production = prod_raw
+            fg_close = fg_close_raw
 
         resin_usage = production * usage_ratio
         next_prod_est = plan_df.iloc[i + 1]["Sales Plan (t)"] if i + 1 < len(plan_df) else production
@@ -102,8 +117,6 @@ def compute(plan_df: pd.DataFrame):
         resin_close = resin_inv + purchase_qty - resin_usage
         blended = total_cost / (resin_inv + purchase_qty) if (resin_inv + purchase_qty) else 0
 
-        fg_close = fg_inv + production - sales
-
         fg_days = fg_close / (next_sales / prod_days) if next_sales else 0
         resin_days = resin_close / ((next_prod_est * usage_ratio) / prod_days) if next_prod_est else 0
 
@@ -117,6 +130,8 @@ def compute(plan_df: pd.DataFrame):
             "Usage Resin": resin_usage,
             "Resin Stock": resin_close,
             "Resin Days": resin_days,
+            "Resin Unit Price": cheapest_price,
+            "Resin Source": cheapest_src,
             "Blended $/t": blended,
         })
 
@@ -125,37 +140,36 @@ def compute(plan_df: pd.DataFrame):
     return pd.DataFrame(rows)
 
 
-# ────────────────────── Styling helpers ─────────────────────
+# ───────────── Styling ─────────────
 def style_report(df: pd.DataFrame):
     metrics = ["Sales Out", "Production",
                "FG Stock", "FG Days",
                "Incoming Resin", "Usage Resin", "Resin Stock", "Resin Days",
+               "Resin Unit Price", "Resin Source",
                "Blended $/t"]
 
     pivot = df.set_index("Month")[metrics].T
     pivot.index = ["Sales Out", "Production",
                    "Stock Finished Goods", "Days FG",
                    "Incoming Resin", "Usage Resin", "Ending Stock Resin", "Days Resin",
+                   "Unit Price Resin", "Source Resin",
                    "Average Blended Usage Resin Price"]
 
     sty = pivot.style
 
-    # base style
     sty.set_table_styles([
         {"selector": "th",
          "props": [("background-color", "#f2f2f2"), ("font-weight", "bold")]},
         {"selector": "td",
-         "props": [("border", "1px solid #d0d0d0"),
-                   ("text-align", "center")]}
+         "props": [("border", "1px solid #d0d0d0"), ("text-align", "center")]}
     ], overwrite=False)
 
-    # orange resin rows
     def orange(row):
-        if row.name in ["Incoming Resin", "Usage Resin", "Ending Stock Resin"]:
+        if row.name in ["Incoming Resin", "Usage Resin", "Ending Stock Resin",
+                        "Unit Price Resin", "Source Resin"]:
             return ["background-color:#fbe5d6"] * len(row)
         return ["" for _ in row]
 
-    # blue day rows
     def blue(row):
         if row.name in ["Days FG", "Days Resin"]:
             return ["color:#0073b7;font-weight:bold"] * len(row)
@@ -167,7 +181,7 @@ def style_report(df: pd.DataFrame):
     return sty
 
 
-# ─────────────────────────── Run ────────────────────────────
+# ───────────── Run ─────────────
 if st.button("🚀 Generate Styled Plan"):
     calc_df = compute(assump_df.copy())
     styled = style_report(calc_df)
