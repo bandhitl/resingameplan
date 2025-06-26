@@ -9,13 +9,15 @@ st.set_page_config(page_title="Resin Purchase & Production Advisor", layout="wid
 st.title("📈 Resin Purchase & Production Advisor")
 
 """
-Enhanced dashboard resembling BNI’s *Resin Games Plan*:
+Enhanced dashboard with:
 
-* Corporate colours & layout  
+* Corporate **Resin Games Plan** table  
 * FG capacity hard‑capped at **500 t**  
-* AI section forecasts PVC resin price trend for the next **3 months**, citing fresh demand/supply news.  
-  Requires `NEWS_API_KEY` (NewsAPI.org) and optionally `OPENAI_API_KEY` for GPT summary.
+* **Historical PVC resin purchase price chart** (IDR/kg & USD/t)  
+* **AI PVC price outlook** (next 3 months) – auto‑summarises fresh demand‑supply news  
+  (Requires `NEWS_API_KEY`; add `OPENAI_API_KEY` to use GPT)
 """
+
 
 # ───────────── Sidebar ─────────────
 with st.sidebar:
@@ -30,72 +32,83 @@ with st.sidebar:
     prod_days = st.number_input("Production days per month", 15, 31, 25, step=1)
     usage_ratio = st.number_input("Resin usage ratio (% of production)", 0.0, 1.0, 0.725, step=0.005)
 
-FG_CAP = 500
+FG_CAP = 500  # tonnes
 
-# Default table
+
+# ───────────── Historical price data & chart ─────────────
+hist_df = pd.DataFrame({
+    "Month": ["Jul-24","Aug-24","Sep-24","Oct-24","Nov-24","Dec-24",
+              "Jan-25","Feb-25","Mar-25","Apr-25","May-25","Jun-25"],
+    "IDR/kg": [13300,13460,12800,12340,11960,12100,11960,11810,11710,11320,11320,11320],
+    "USD/t":  [815.95,825.77,785.28,757.06,733.74,742.33,733.74,724.54,718.40,694.48,694.48,694.48]
+})
+hist_df["Date"] = pd.to_datetime(hist_df["Month"], format="%b-%y")
+
+st.subheader("Historical PVC Resin Purchase Price")
+st.line_chart(
+    hist_df.set_index("Date")[["IDR/kg","USD/t"]],
+    height=300,
+    use_container_width=True
+)
+
+# ───────────── Build editable assumptions table ─────────────
 months = pd.date_range(pd.to_datetime(m0), periods=horizon, freq="MS").strftime("%b-%y")
 def default_df(labels):
     return pd.DataFrame({
         "Month": labels,
         "Sales Plan (t)": [800 + 50*i for i in range(len(labels))],
         "Local": [690 + 10*i for i in range(len(labels))],
-        "TPE": [np.nan if i>1 else 760-15*i for i in range(len(labels))],
-        "China/Korea": [np.nan if i>1 else 740-11*i for i in range(len(labels))]
+        "TPE": [np.nan if i>1 else 760 - 15*i for i in range(len(labels))],
+        "China/Korea": [np.nan if i>1 else 740 - 11*i for i in range(len(labels))]
     })
 
 if "assump_df" not in st.session_state or st.session_state.get("cache_m0")!=m0 or st.session_state.get("cache_h")!=horizon:
-    st.session_state["assump_df"]=default_df(months)
-    st.session_state["cache_m0"]=m0
-    st.session_state["cache_h"]=horizon
+    st.session_state["assump_df"] = default_df(months)
+    st.session_state["cache_m0"] = m0
+    st.session_state["cache_h"] = horizon
 
 assump_df = st.data_editor(
     st.session_state["assump_df"],
     num_rows="dynamic",
     use_container_width=True,
-    key="input_table",
-    column_config={
-        "Month": st.column_config.Column(required=True),
-        "Sales Plan (t)": st.column_config.NumberColumn(required=True),
-        "Local": st.column_config.NumberColumn(),
-        "TPE": st.column_config.NumberColumn(),
-        "China/Korea": st.column_config.NumberColumn(),
-    },
+    key="input_table"
 )
+
 st.divider()
 
-def compute(df):
-    fg_inv,resin_inv,blended = fg_open,resin_open,resin_blended_open
-    res=[]
+# ───────────── Core plan computation (unchanged logic) ─────────────
+def compute(df: pd.DataFrame):
+    fg_inv, resin_inv, blended = fg_open, resin_open, resin_blended_open
+    rows=[]
     for i,row in df.iterrows():
-        sales=row["Sales Plan (t)"]
+        month=row["Month"]; sales=row["Sales Plan (t)"]
         next_sales=df.iloc[i+1]["Sales Plan (t)"] if i+1<len(df) else sales
         fg_target_close=fg_target_days/prod_days*next_sales
         prod_raw=max(0,sales+fg_target_close-fg_inv)
         fg_close_raw=fg_inv+prod_raw-sales
         if fg_close_raw>FG_CAP:
-            production=max(0,prod_raw-(fg_close_raw-FG_CAP))
-            fg_close=FG_CAP
+            production=max(0,prod_raw-(fg_close_raw-FG_CAP)); fg_close=FG_CAP
         else:
             production=prod_raw; fg_close=fg_close_raw
         resin_usage=production*usage_ratio
         next_prod=df.iloc[i+1]["Sales Plan (t)"] if i+1<len(df) else production
         resin_target_close=resin_target_days/prod_days*next_prod*usage_ratio
-        prices={k:row[k] for k in ["Local","TPE","China/Korea"] if pd.notna(row[k])}
-        src=min(prices,key=prices.get); price=prices[src]
+        price_map={k:row[k] for k in ["Local","TPE","China/Korea"] if pd.notna(row[k])}
+        src=min(price_map,key=price_map.get); price=price_map[src]
         purchase=max(0,resin_usage+resin_target_close-resin_inv)
         blended=(resin_inv*blended+purchase*price)/(resin_inv+purchase) if (resin_inv+purchase) else blended
         resin_close=resin_inv+purchase-resin_usage
         fg_days=fg_close/(next_sales/prod_days) if next_sales else 0
         resin_days=resin_close/((next_prod*usage_ratio)/prod_days) if next_prod else 0
-        res.append({
-            "Month":row["Month"],"Sales Out":sales,"Production":production,
+        rows.append({
+            "Month":month,"Sales Out":sales,"Production":production,
             "FG Stock":fg_close,"FG Days":fg_days,
             "Incoming Resin":purchase,"Unit Price Resin":price,"Source Resin":src,
             "Usage Resin":resin_usage,"Resin Stock":resin_close,"Resin Days":resin_days,
             "Blended $/t":blended
         })
-        fg_inv, resin_inv = fg_close, resin_close
-    return pd.DataFrame(res)
+        fg_inv,resin_inv=fg_close,resin_close
+    return pd.DataFrame(rows)
 
 def style(df):
     metrics=["Sales Out","Production","FG Stock","FG Days","Incoming Resin","Unit Price Resin","Source Resin","Usage Resin","Resin Stock","Resin Days","Blended $/t"]
@@ -109,43 +122,40 @@ def style(df):
     sty.format(precision=0, formatter=lambda x:f"{x:.0f}" if isinstance(x,(int,float)) else x)
     return sty
 
+# ───────────── AI helpers ─────────────
 def fetch_news():
-    key=os.environ.get("NEWS_API_KEY")
+    key=os.getenv("NEWS_API_KEY")
     if not key: return []
     start=date.today()-timedelta(days=30)
-    url=f"https://newsapi.org/v2/everything?q=PVC%20resin%20price%20OR%20PVC%20demand%20supply&from={start}&language=en&sortBy=publishedAt&pageSize=20&apiKey={key}"
+    url=f"https://newsapi.org/v2/everything?q=PVC%%20resin%%20price%%20OR%%20PVC%%20demand%%20supply&from={start}&language=en&sortBy=publishedAt&pageSize=20&apiKey={key}"
     try:
         return [a["title"] for a in requests.get(url,timeout=10).json().get("articles",[])]
     except Exception: return []
 
 def summarize(headlines):
-    key=os.environ.get("OPENAI_API_KEY")
-    if not key or not headlines: return "N/A","Set env vars for forecast."
+    key=os.getenv("OPENAI_API_KEY")
+    if not key or not headlines: return "N/A","(Provide API keys to enable AI forecast.)"
     openai.api_key=key
-    prompt="You are a petrochemical analyst. Using these headlines, state whether PVC resin price trend next 3 months in SE Asia is UP, DOWN, or FLAT, then list key drivers.\n\n"+"\n".join(headlines)
+    prompt="You are a petrochemical analyst. Using these headlines, state whether PVC resin price trend next 3 months in SE Asia is UP, DOWN, or FLAT, then give key drivers.\n\n"+"\n".join(headlines)
     try:
-        resp=openai.ChatCompletion.create(model="gpt-3.5-turbo",messages=[{"role":"user","content":prompt}],max_tokens=150)
-        text=resp.choices[0].message.content.strip()
-        return text.split()[0],text
+        txt=openai.ChatCompletion.create(model="gpt-3.5-turbo",messages=[{"role":"user","content":prompt}],max_tokens=150).choices[0].message.content.strip()
+        return txt.split()[0],txt
     except Exception as e:
         return "N/A",f"GPT error: {e}"
 
+# ───────────── Main button ─────────────
 if st.button("🚀 Generate Styled Plan"):
     calc=compute(assump_df.copy())
-    sty=style(calc)
-    start_lbl=m0.strftime("%b %Y")
-    end_lbl=(pd.to_datetime(m0)+pd.DateOffset(months=horizon-1)).strftime("%b %Y")
-    st.subheader(f"BNI Resin Games Plan : {start_lbl} – {end_lbl}")
-    st.markdown(sty.to_html(),unsafe_allow_html=True)
+    st.subheader(f"BNI Resin Games Plan : {m0.strftime('%b %Y')} – {(pd.to_datetime(m0)+pd.DateOffset(months=horizon-1)).strftime('%b %Y')}")
+    st.markdown(style(calc).to_html(),unsafe_allow_html=True)
 
     st.subheader("PVC Resin Price Outlook (next 3 months)")
     news=fetch_news()
-    trend, rationale=summarize(news)
+    trend,rationale=summarize(news)
     st.write(f"**Trend:** {trend}")
     st.write(rationale)
     if news:
         with st.expander("News headlines considered"):
-            for h in news:
-                st.markdown(f"- {h}")
+            for h in news: st.markdown(f"- {h}")
 
     st.download_button("Download raw CSV", calc.to_csv(index=False).encode(), "resin_plan.csv", mime="text/csv")
